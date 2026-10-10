@@ -1,0 +1,276 @@
+//@version=6
+strategy("Crypto Multi-TF Risk Managed Strategy v6", 
+         overlay=true,
+         pyramiding=1,
+         initial_capital=10000,
+         default_qty_type=strategy.fixed,
+         default_qty_value=1,
+         commission_type=strategy.commission.percent,
+         commission_value=0.04,
+         calc_on_every_tick=false,
+         process_orders_on_close=true,
+         max_labels_count=100)
+
+//==================================================
+// 1. 用户参数配置
+//==================================================
+accountCapital = input.float(10000.0, "账户资金", minval=1000.0, step=100.0)
+riskPerTradePct = input.float(1.0, "单笔风险 (%)", minval=0.1, maxval=10.0, step=0.1)
+maxDailyLossPct = input.float(5.0, "最大日内亏损 (%)", minval=0.5, maxval=30.0, step=0.5)
+maxDrawdownPct = input.float(15.0, "最大回撤 (%)", minval=1.0, maxval=50.0, step=0.5)
+
+entryTF = input.timeframe("15", "入场周期")
+trendTF1 = input.timeframe("1H", "趋势周期1")
+trendTF2 = input.timeframe("4H", "趋势周期2")
+macroTF = input.timeframe("1D", "宏观周期")
+
+emaFastLen = input.int(9, "快速EMA", minval=3, maxval=50)
+emaSlowLen = input.int(21, "慢速EMA", minval=5, maxval=200)
+semiFastLen = input.int(20, "趋势快线", minval=5, maxval=100)
+semiSlowLen = input.int(50, "趋势慢线", minval=10, maxval=200)
+longTrendLen = input.int(200, "长期趋势均线", minval=50, maxval=500)
+
+rsiLen = input.int(14, "RSI周期", minval=5, maxval=50)
+rsiLongLevel = input.int(55, "RSI多头阈值", minval=30, maxval=80)
+rsiShortLevel = input.int(45, "RSI空头阈值", minval=20, maxval=70)
+
+macdFast = input.int(12, "MACD快线", minval=5, maxval=50)
+macdSlow = input.int(26, "MACD慢线", minval=10, maxval=100)
+macdSignal = input.int(9, "MACD Signal", minval=3, maxval=50)
+
+adxLen = input.int(14, "ADX周期", minval=5, maxval=50)
+adxTrendMin = input.int(25, "ADX趋势最小值", minval=10, maxval=60)
+
+atrLen = input.int(14, "ATR周期", minval=5, maxval=50)
+stopAtrMult = input.float(1.8, "止损ATR倍数", minval=0.5, maxval=10.0, step=0.1)
+takeProfitAtrMult = input.float(2.8, "止盈ATR倍数", minval=0.5, maxval=20.0, step=0.1)
+trailAtrMult = input.float(1.4, "跟踪止损ATR倍数", minval=0.2, maxval=10.0, step=0.1)
+
+volumeMaLen = input.int(20, "成交量均线周期", minval=5, maxval=200)
+volMultiplier = input.float(1.2, "成交量倍数", minval=0.8, maxval=5.0, step=0.05)
+
+showSignals = input.bool(true, "显示信号")
+showTrendLines = input.bool(true, "显示趋势线")
+showRiskTable = input.bool(true, "显示风险面板")
+showStopTP = input.bool(true, "显示止损/止盈")
+
+//==================================================
+// 2. 主要价格数据
+//==================================================
+priceClose = close
+priceOpen = open
+priceHigh = high
+priceLow = low
+
+emaFast = ta.ema(priceClose, emaFastLen)
+emaSlow = ta.ema(priceClose, emaSlowLen)
+emaTrendFast = ta.ema(priceClose, semiFastLen)
+emaTrendSlow = ta.ema(priceClose, semiSlowLen)
+emaLongTrend = ta.ema(priceClose, longTrendLen)
+
+rsi = ta.rsi(priceClose, rsiLen)
+macdLine, macdSignalLine, macdHist = ta.macd(priceClose, macdFast, macdSlow, macdSignal)
+atr = ta.atr(atrLen)
+volMa = ta.sma(volume, volumeMaLen)
+VWAP = ta.vwap(hlc3)
+ADX = ta.adx(adxLen)
+
+bullTrend = emaFast > emaSlow and emaTrendFast > emaTrendSlow and emaTrendSlow > emaLongTrend
+bearTrend = emaFast < emaSlow and emaTrendFast < emaTrendSlow and emaTrendSlow < emaLongTrend
+
+bullMomentum = macdLine > macdSignalLine and macdHist > 0
+bearMomentum = macdLine < macdSignalLine and macdHist < 0
+
+bullVolume = volume > volMa * volMultiplier
+bearVolume = volume > volMa * volMultiplier
+
+bullVWAP = close > VWAP
+bearVWAP = close < VWAP
+
+trendStrength = ADX > adxTrendMin
+
+//==================================================
+// 3. 多周期数据（趋势过滤）
+//==================================================
+secH1Close = request.security(syminfo.tickerid, trendTF1, close)
+secH4Close = request.security(syminfo.tickerid, trendTF2, close)
+secD1Close = request.security(syminfo.tickerid, macroTF, close)
+
+secH1EmaFast = request.security(syminfo.tickerid, trendTF1, ta.ema(close, emaFastLen))
+secH1EmaSlow = request.security(syminfo.tickerid, trendTF1, ta.ema(close, emaSlowLen))
+secH1TrendFast = request.security(syminfo.tickerid, trendTF1, ta.ema(close, semiFastLen))
+secH1TrendSlow = request.security(syminfo.tickerid, trendTF1, ta.ema(close, semiSlowLen))
+
+secH4EmaFast = request.security(syminfo.tickerid, trendTF2, ta.ema(close, emaFastLen))
+secH4EmaSlow = request.security(syminfo.tickerid, trendTF2, ta.ema(close, emaSlowLen))
+secH4TrendFast = request.security(syminfo.tickerid, trendTF2, ta.ema(close, semiFastLen))
+secH4TrendSlow = request.security(syminfo.tickerid, trendTF2, ta.ema(close, semiSlowLen))
+
+secD1EmaFast = request.security(syminfo.tickerid, macroTF, ta.ema(close, emaFastLen))
+secD1EmaSlow = request.security(syminfo.tickerid, macroTF, ta.ema(close, emaSlowLen))
+secD1TrendFast = request.security(syminfo.tickerid, macroTF, ta.ema(close, semiFastLen))
+secD1TrendSlow = request.security(syminfo.tickerid, macroTF, ta.ema(close, semiSlowLen))
+
+macroBullScore = 0
+macroBullScore += secH1Close > secH1EmaFast ? 1 : 0
+macroBullScore += secH1EmaFast > secH1EmaSlow ? 1 : 0
+macroBullScore += secH1TrendFast > secH1TrendSlow ? 1 : 0
+macroBullScore += secH4Close > secH4EmaFast ? 1 : 0
+macroBullScore += secH4EmaFast > secH4EmaSlow ? 1 : 0
+macroBullScore += secH4TrendFast > secH4TrendSlow ? 1 : 0
+macroBullScore += secD1Close > secD1EmaFast ? 1 : 0
+macroBullScore += secD1EmaFast > secD1EmaSlow ? 1 : 0
+macroBullScore += secD1TrendFast > secD1TrendSlow ? 1 : 0
+
+macroBearScore = 0
+macroBearScore += secH1Close < secH1EmaFast ? 1 : 0
+macroBearScore += secH1EmaFast < secH1EmaSlow ? 1 : 0
+macroBearScore += secH1TrendFast < secH1TrendSlow ? 1 : 0
+macroBearScore += secH4Close < secH4EmaFast ? 1 : 0
+macroBearScore += secH4EmaFast < secH4EmaSlow ? 1 : 0
+macroBearScore += secH4TrendFast < secH4TrendSlow ? 1 : 0
+macroBearScore += secD1Close < secD1EmaFast ? 1 : 0
+macroBearScore += secD1EmaFast < secD1EmaSlow ? 1 : 0
+macroBearScore += secD1TrendFast < secD1TrendSlow ? 1 : 0
+
+macroBull = macroBullScore >= 5 and secD1Close > secD1EmaSlow
+macroBear = macroBearScore >= 5 and secD1Close < secD1EmaSlow
+
+//==================================================
+// 4. 进场逻辑
+//==================================================
+longEntry = bullTrend and macroBull and bullMomentum and rsi > rsiLongLevel and trendStrength and bullVWAP and bullVolume
+shortEntry = bearTrend and macroBear and bearMomentum and rsi < rsiShortLevel and trendStrength and bearVWAP and bearVolume
+
+// 继续过滤：避免极端震荡
+longConfirm = longEntry and close > emaTrendFast and emaTrendFast > emaTrendSlow
+shortConfirm = shortEntry and close < emaTrendFast and emaTrendFast < emaTrendSlow
+
+//==================================================
+// 5. 风险计算与仓位管理
+//==================================================
+calcPositionQty(entryPrice, stopPrice) =>
+    riskAmount = accountCapital * (riskPerTradePct / 100.0)
+    riskDistance = math.abs(entryPrice - stopPrice)
+    riskDistance <= 0 ? 1 : riskAmount / riskDistance
+
+longStop = low - atr * stopAtrMult
+shortStop = high + atr * stopAtrMult
+longTP = close + atr * takeProfitAtrMult
+shortTP = close - atr * takeProfitAtrMult
+trailLong = close - atr * trailAtrMult
+trailShort = close + atr * trailAtrMult
+
+// 日内交易限制
+netPnl = strategy.netprofit
+dailyLossPct = (netPnl / accountCapital) * 100.0
+maxDrawdownPctCurrent = (strategy.equity / strategy.initial_capital - 1) * 100.0
+
+dailyLossBlocked = dailyLossPct <= -maxDailyLossPct
+maxDrawdownBlocked = maxDrawdownPctCurrent <= -maxDrawdownPct
+
+//==================================================
+// 6. 执行开平仓
+//==================================================
+if longConfirm and not dailyLossBlocked and not maxDrawdownBlocked and strategy.position_size <= 0
+    qty = calcPositionQty(close, longStop)
+    strategy.entry("Long", strategy.long, qty=qty)
+    strategy.exit("Long Exit", from_entry="Long", stop=longStop, limit=longTP, trail_points=atr * trailAtrMult, trail_offset=0)
+    if showSignals
+        label.new(bar_index, low, "LONG", color=color.new(color.lime, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+if shortConfirm and not dailyLossBlocked and not maxDrawdownBlocked and strategy.position_size >= 0
+    qty = calcPositionQty(close, shortStop)
+    strategy.entry("Short", strategy.short, qty=qty)
+    strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortTP, trail_points=atr * trailAtrMult, trail_offset=0)
+    if showSignals
+        label.new(bar_index, high, "SHORT", color=color.new(color.red, 0), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+// 退出逻辑
+if strategy.position_is_long and (close < emaFast or rsi < 50 or macdLine < macdSignalLine)
+    strategy.close("Long Close")
+    if showSignals
+        label.new(bar_index, high, "EXIT L", color=color.new(color.orange, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+
+if strategy.position_is_short and (close > emaFast or rsi > 50 or macdLine > macdSignalLine)
+    strategy.close("Short Close")
+    if showSignals
+        label.new(bar_index, low, "EXIT S", color=color.new(color.orange, 0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+
+// 追踪止损生效：多头使用 close - atr*trailAtrMult, 空头使用 close + atr*trailAtrMult
+if strategy.position_is_long
+    strategy.exit("Long Trail", from_entry="Long", trail_points=atr * trailAtrMult, trail_offset=0)
+
+if strategy.position_is_short
+    strategy.exit("Short Trail", from_entry="Short", trail_points=atr * trailAtrMult, trail_offset=0)
+
+//==================================================
+// 7. 画图
+//==================================================
+plot(showTrendLines ? emaFast : na, "EMA Fast", color=color.new(color.aqua, 0), linewidth=2)
+plot(showTrendLines ? emaSlow : na, "EMA Slow", color=color.new(color.orange, 0), linewidth=2)
+plot(showTrendLines ? emaTrendFast : na, "Trend Fast", color=color.new(color.teal, 0), linewidth=2)
+plot(showTrendLines ? emaTrendSlow : na, "Trend Slow", color=color.new(color.red, 0), linewidth=2)
+
+plot(showStopTP ? longStop : na, "Long Stop", color=color.new(color.lime, 0), linewidth=1, style=plot.style_linebr)
+plot(showStopTP ? shortStop : na, "Short Stop", color=color.new(color.red, 0), linewidth=1, style=plot.style_linebr)
+plot(showStopTP ? longTP : na, "Long TP", color=color.new(color.green, 0), linewidth=1, style=plot.style_linebr)
+plot(showStopTP ? shortTP : na, "Short TP", color=color.new(color.maroon, 0), linewidth=1, style=plot.style_linebr)
+
+//==================================================
+// 8. 风险面板
+//==================================================
+var table riskTable = table.new(position.top_right, 2, 10, border_width=1, border_color=color.gray, frame_color=color.gray, frame_width=1)
+
+if showRiskTable and barstate.islast
+    table.cell(riskTable, 0, 0, "账户资金", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(riskTable, 1, 0, str.tostring(accountCapital, "#.##"), text_color=color.white, bgcolor=color.new(color.black, 0))
+
+    table.cell(riskTable, 0, 1, "单笔风险", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(riskTable, 1, 1, str.tostring(riskPerTradePct, "#.##") + "%", text_color=color.white, bgcolor=color.new(color.black, 0))
+
+    table.cell(riskTable, 0, 2, "最大日亏损", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(riskTable, 1, 2, str.tostring(maxDailyLossPct, "#.##") + "%", text_color=color.white, bgcolor=color.new(color.black, 0))
+
+    table.cell(riskTable, 0, 3, "回撤控制", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(riskTable, 1, 3, str.tostring(maxDrawdownPct, "#.##") + "%", text_color=color.white, bgcolor=color.new(color.black, 0))
+
+    table.cell(riskTable, 0, 4, "净利润", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(riskTable, 1, 4, str.tostring(strategy.netprofit, "#.##"), text_color=color.white, bgcolor=color.new(color.black, 0))
+
+    table.cell(riskTable, 0, 5, "当前仓位", text_color=color.white, bgcolor=color.new(color.black, 0))
+    if strategy.position_is_long
+        table.cell(riskTable, 1, 5, "多头", text_color=color.lime, bgcolor=color.new(color.black, 0))
+    else if strategy.position_is_short
+        table.cell(riskTable, 1, 5, "空头", text_color=color.red, bgcolor=color.new(color.black, 0))
+    else
+        table.cell(riskTable, 1, 5, "观望", text_color=color.gray, bgcolor=color.new(color.black, 0))
+
+    table.cell(riskTable, 0, 6, "ADX", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(riskTable, 1, 6, str.tostring(ADX, "#.##"), text_color=color.white, bgcolor=color.new(color.black, 0))
+
+    table.cell(riskTable, 0, 7, "RSI", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(riskTable, 1, 7, str.tostring(rsi, "#.##"), text_color=color.white, bgcolor=color.new(color.black, 0))
+
+    table.cell(riskTable, 0, 8, "部位风险", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(riskTable, 1, 8, str.tostring((strategy.position_size / strategy.equity) * 100.0, "#.##") + "%", text_color=color.white, bgcolor=color.new(color.black, 0))
+
+    table.cell(riskTable, 0, 9, "模式", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(riskTable, 1, 9, "多周期趋势", text_color=color.white, bgcolor=color.new(color.black, 0))
+
+//==================================================
+// 9. 报警
+//==================================================
+alertcondition(longConfirm, title="多头信号", message="多头信号：加密货币多周期趋势共振，执行买入")
+alertcondition(shortConfirm, title="空头信号", message="空头信号：加密货币多周期趋势共振，执行卖出")
+alertcondition(strategy.position_is_long, title="持有多头", message="当前持有多头，注意止损与跟踪止损")
+alertcondition(strategy.position_is_short, title="持有空头", message="当前持有空头，注意止损与跟踪止损")
+
+//==================================================
+// 10. 说明
+//==================================================
+// 适用对象：加密货币现货/合约实盘盯盘、趋势跟踪、回撤控盘
+// 逻辑：短周期入场 + 中长期趋势过滤 + 动量+波动+成交量确认 + 风险控制
+// 优势：适合全天候监测，信号更稳定，防止盲目追涨杀跌
+// 建议：优先在 15m/1H/4H/1D 多周期一起看，避免单周期盲目交易
+
